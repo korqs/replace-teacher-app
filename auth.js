@@ -1,308 +1,285 @@
-const jwt = require('jsonwebtoken');
-require('dotenv').config();
-const { pool } = require('./init_db');
-
-const JWT_SECRET = process.env.JWT_SECRET || 'teacher-replacement-system-secret-key-2025';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const ADMIN_PASSWORD = (process.env.ADMIN_PASSWORD || 'admin123').trim();
-const TEACHER_PASSWORD = (process.env.TEACHER_PASSWORD || 'teacher123').trim();
-const ADMIN_EMAIL = 'admin@university.ru';
-
-if (process.env.NODE_ENV === 'production') {
-    if (!process.env.JWT_SECRET) {
-        console.warn('⚠️  JWT_SECRET не задан — задайте его в переменных окружения сервера');
-    }
-    if (!process.env.ADMIN_PASSWORD || !process.env.TEACHER_PASSWORD) {
-        console.warn('⚠️  ADMIN_PASSWORD и TEACHER_PASSWORD рекомендуется задать в production');
-    }
-}
-
-class Auth {
-    static isPasswordValid(role, password) {
-        if (!password) return false;
-        const normalizedRole = String(role || '').trim().toLowerCase();
-        if (normalizedRole === 'admin') {
-            return password === ADMIN_PASSWORD;
-        }
-        return password === TEACHER_PASSWORD;
+// public/auth.js - УПРОЩЕННАЯ ВЕРСИЯ
+class AuthSystem {
+    constructor() {
+        this.apiBaseUrl = window.location.origin;
+        this.token = localStorage.getItem('token');
+        this.user = JSON.parse(localStorage.getItem('user') || 'null');
     }
 
-    static async login(email, password) {
+    // Вход в систему
+    async login(email, password) {
         try {
-            console.log('🔐 Попытка входа для:', email);
-
-            if (!email || !password) {
-                return {
-                    success: false,
-                    message: 'Email и пароль обязательны'
-                };
-            }
-
-            const userResult = await pool.query(
-                `SELECT u.email, u.role, u.teacher_name, t.name as full_name
-                 FROM api.users u
-                 LEFT JOIN teachers t ON u.teacher_name = t.name
-                 WHERE u.email = $1`,
-                [email.trim().toLowerCase()]
-            );
-
-            if (userResult.rows.length === 0) {
-                console.log('❌ Пользователь не найден:', email);
-                if (email.trim().toLowerCase() === ADMIN_EMAIL) {
-                    console.log('💡 Учётная запись admin@university.ru отсутствует в api.users — перезапустите сервер или выполните npm run init-db');
-                }
-                return {
-                    success: false,
-                    message: 'Неверный email или пароль'
-                };
-            }
-
-            const dbUser = userResult.rows[0];
-            const normalizedRole = String(dbUser.role || '').trim().toLowerCase();
-
-            if (!Auth.isPasswordValid(normalizedRole, password)) {
-                console.log('❌ Неверный пароль для роли:', dbUser.role);
-                if (normalizedRole === 'admin') {
-                    console.log('💡 Для администратора используется пароль из ADMIN_PASSWORD (по умолчанию: admin123), не teacher123');
-                }
-                return {
-                    success: false,
-                    message: normalizedRole === 'admin'
-                        ? 'Неверный пароль администратора. Используйте admin123 (или значение ADMIN_PASSWORD в .env)'
-                        : 'Неверный email или пароль'
-                };
-            }
+            console.log('Попытка входа для:', email);
             
-            console.log('✅ Пользователь найден:', {
-                email: dbUser.email,
-                role: dbUser.role,
-                teacher_name: dbUser.teacher_name,
-                full_name: dbUser.full_name
-            });
-            
-            const displayName = dbUser.role === 'admin'
-                ? 'Администратор'
-                : (dbUser.full_name || dbUser.teacher_name || dbUser.email);
-
-            const token = jwt.sign(
-                {
-                    email: dbUser.email,
-                    role: dbUser.role,
-                    teacher_name: dbUser.teacher_name,
-                    full_name: displayName
+            const response = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
                 },
-                JWT_SECRET,
-                { expiresIn: JWT_EXPIRES_IN }
-            );
-            
-            console.log('✅ Токен сгенерирован (длина:', token.length, 'символов)');
-            
-            return {
-                success: true,
-                token,
-                user: {
-                    email: dbUser.email,
-                    role: dbUser.role,
-                    teacher_name: dbUser.teacher_name,
-                    full_name: displayName
-                }
-            };
-            
-        } catch (error) {
-            console.error('❌ Ошибка при входе:', error.message);
-            console.error('❌ Stack:', error.stack);
-            return {
-                success: false,
-                message: error.message
-            };
-        }
-    }
+                body: JSON.stringify({ email, password })
+            });
 
-    // Верификация токена
-    static verifyToken(token) {
-        console.log('🔐 Проверка токена. Длина:', token?.length || 0);
-        
-        if (!token) {
-            throw new Error('Токен не предоставлен');
-        }
-        
-        try {
-            const decoded = jwt.verify(token, JWT_SECRET);
-            console.log('✅ Токен валиден для:', decoded.email);
-            return decoded;
-        } catch (error) {
-            console.error('❌ Ошибка верификации токена:', error.message);
-            console.error('❌ Тип ошибки:', error.name);
-            throw new Error(`Неверный или просроченный токен: ${error.message}`);
-        }
-    }
-
-    // Middleware для проверки аутентификации
-    static authenticateToken(req, res, next) {
-        console.log('\n🔐 ========== Middleware authenticateToken ==========');
-        console.log('🌐 URL:', req.originalUrl);
-        
-        // Разрешаем тестовый маршрут без аутентификации
-        if (req.originalUrl === '/api/test-schedule') {
-            console.log('✅ Пропускаем аутентификацию для тестового маршрута');
-            return next();
-        }
-        
-        const authHeader = req.headers['authorization'];
-        
-        if (!authHeader) {
-            console.warn('⚠️ Заголовок Authorization отсутствует');
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Требуется аутентификация'
-            });
-        }
-        
-        const parts = authHeader.split(' ');
-        
-        if (parts.length !== 2 || parts[0] !== 'Bearer') {
-            console.warn('⚠️ Неверный формат заголовка Authorization');
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Неверный формат токена. Используйте: Bearer <token>'
-            });
-        }
-        
-        const token = parts[1];
-        
-        if (!token) {
-            console.warn('⚠️ Токен пустой');
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Токен не предоставлен'
-            });
-        }
-        
-        console.log('🔑 Токен получен (длина:', token.length, 'символов)');
-        
-        try {
-            const decoded = Auth.verifyToken(token);
-            console.log('✅ Аутентификация успешна! Пользователь:', decoded.email);
-            
-            req.user = decoded;
-            next();
-            
-        } catch (error) {
-            console.error('❌ Аутентификация не удалась:', error.message);
-            return res.status(401).json({ 
-                success: false, 
-                message: 'Неверный или просроченный токен'
-            });
-        }
-    }
-
-    // Доступ только для администратора
-    static requireAdmin(req, res, next) {
-        const role = String(req.user?.role || '').trim().toLowerCase();
-        if (role !== 'admin') {
-            return res.status(403).json({
-                success: false,
-                message: 'Доступ только для администратора'
-            });
-        }
-        next();
-    }
-
-    // Получение информации о текущем пользователе (для /api/profile и др.)
-    static async getCurrentUser(email) {
-        try {
-            if (!email) {
-                throw new Error('Email не указан');
+            let data;
+            try {
+                data = await response.json();
+            } catch (_) {
+                throw new Error(`HTTP error! status: ${response.status}`);
             }
-
-            const result = await pool.query(
-                `SELECT u.email, u.role, u.teacher_name, u.created_at,
-                        t.name AS teacher_full_name, t.phone
-                 FROM api.users u
-                 LEFT JOIN teachers t ON u.teacher_name = t.name
-                 WHERE u.email = $1`,
-                [email.trim().toLowerCase()]
-            );
-
-            if (result.rows.length === 0) {
-                throw new Error('Пользователь не найден');
-            }
-
-            const dbUser = result.rows[0];
-            const fullName = dbUser.role === 'admin'
-                ? 'Администратор'
-                : (dbUser.teacher_full_name || dbUser.teacher_name || dbUser.email);
-
-            return {
-                success: true,
-                user: {
-                    email: dbUser.email,
-                    role: dbUser.role,
-                    teacher_name: dbUser.teacher_name,
-                    full_name: fullName,
-                    phone: dbUser.phone || null,
-                    created_at: dbUser.created_at
-                }
-            };
-        } catch (error) {
-            console.error('❌ Ошибка при получении пользователя:', error.message);
-            return {
-                success: false,
-                message: error.message
-            };
-        }
-    }
-
-    static async updateProfile(email, { phone }) {
-        try {
-            if (!email) {
-                return { success: false, message: 'Email не указан' };
-            }
-
-            const userResult = await pool.query(
-                `SELECT u.email, u.role, u.teacher_name
-                 FROM api.users u
-                 WHERE u.email = $1`,
-                [email.trim().toLowerCase()]
-            );
-
-            if (userResult.rows.length === 0) {
-                return { success: false, message: 'Пользователь не найден' };
-            }
-
-            const dbUser = userResult.rows[0];
-            const normalizedRole = String(dbUser.role || '').trim().toLowerCase();
-
-            if (normalizedRole === 'admin') {
-                return {
-                    success: false,
-                    message: 'Профиль администратора не содержит телефона. Изменение недоступно.'
+            
+            if (data.success) {
+                this.token = data.token;
+                this.user = data.user;
+                
+                localStorage.setItem('token', data.token);
+                localStorage.setItem('user', JSON.stringify(data.user));
+                
+                console.log('Вход успешен!');
+                return { success: true, data };
+            } else {
+                console.log('Ошибка входа:', data.message);
+                return { 
+                    success: false, 
+                    message: data.message || 'Неверный email или пароль' 
                 };
             }
-
-            if (!dbUser.teacher_name) {
-                return {
-                    success: false,
-                    message: 'Пользователь не связан с преподавателем'
-                };
-            }
-
-            const normalizedPhone = phone != null ? String(phone).trim() : '';
-            if (!normalizedPhone) {
-                return { success: false, message: 'Укажите номер телефона' };
-            }
-
-            await pool.query(
-                'UPDATE teachers SET phone = $1 WHERE name = $2',
-                [normalizedPhone, dbUser.teacher_name]
-            );
-
-            return Auth.getCurrentUser(email);
         } catch (error) {
-            console.error('❌ Ошибка при обновлении профиля:', error.message);
-            return { success: false, message: error.message };
+            console.error('Ошибка при входе:', error);
+            const isNetworkError = error instanceof TypeError && /fetch|network|failed/i.test(error.message);
+            return { 
+                success: false, 
+                message: isNetworkError
+                    ? 'Ошибка соединения с сервером. Проверьте, что сервер запущен.'
+                    : (error.message || 'Ошибка соединения с сервером')
+            };
         }
+    }
+
+    // Проверка авторизации
+    isAuthenticated() {
+        const token = localStorage.getItem('token');
+        const user = localStorage.getItem('user');
+        if (!token || !user) {
+            return false;
+        }
+        return this.isTokenNotExpired(token);
+    }
+
+    isTokenNotExpired(token) {
+        try {
+            const base64 = token.split('.')[1]?.replace(/-/g, '+').replace(/_/g, '/');
+            if (!base64) {
+                return false;
+            }
+            const payload = JSON.parse(atob(base64));
+            if (payload.exp && payload.exp * 1000 <= Date.now()) {
+                return false;
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    clearStoredAuth(message) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        this.token = null;
+        this.user = null;
+        if (message) {
+            sessionStorage.setItem('auth_message', message);
+        }
+    }
+
+    async validateSession() {
+        const token = localStorage.getItem('token');
+        if (!token || !localStorage.getItem('user')) {
+            return false;
+        }
+
+        if (!this.isTokenNotExpired(token)) {
+            this.clearStoredAuth('Сессия истекла. Войдите снова.');
+            return false;
+        }
+
+        try {
+            const response = await fetch('/api/profile', {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+
+            if (response.status === 401) {
+                this.clearStoredAuth('Сессия истекла. Войдите снова.');
+                return false;
+            }
+
+            return response.ok;
+        } catch (_) {
+            return true;
+        }
+    }
+
+    // Получение информации о текущем пользователе
+    getCurrentUser() {
+        const userStr = localStorage.getItem('user');
+        return userStr ? JSON.parse(userStr) : null;
+    }
+
+    // Выход из системы
+    logout() {
+        console.log('Выход из системы');
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        this.token = null;
+        this.user = null;
+        
+        // Немедленно перенаправляем на главную
+        window.location.href = '/';
     }
 }
 
-module.exports = Auth;
+// Глобальный экземпляр
+window.auth = new AuthSystem();
+
+// ================================================
+// ОБРАБОТКА ФОРМЫ ВХОДА (ТОЛЬКО ДЛЯ index.html)
+// ================================================
+document.addEventListener('DOMContentLoaded', async function() {
+    // Проверяем, находимся ли мы на странице входа
+    const loginForm = document.getElementById('loginForm');
+    const errorMessage = document.getElementById('errorMessage');
+    
+    if (!loginForm) {
+        console.log('Не на странице входа, пропускаем инициализацию формы');
+        return;
+    }
+    
+    console.log('Инициализация формы входа...');
+
+    function showError(message) {
+        if (!errorMessage) return;
+
+        const errorText = document.getElementById('errorText');
+        if (errorText) {
+            errorText.textContent = message;
+        }
+        errorMessage.style.display = 'flex';
+
+        setTimeout(() => {
+            errorMessage.style.display = 'none';
+        }, 5000);
+    }
+
+    const authNotice = sessionStorage.getItem('auth_message');
+    if (authNotice) {
+        sessionStorage.removeItem('auth_message');
+        showError(authNotice);
+    }
+    
+    // Если уже авторизован и на странице входа - перенаправляем на dashboard
+    if (window.auth.isAuthenticated()) {
+        const valid = await window.auth.validateSession();
+        if (valid) {
+            console.log('Уже авторизован, перенаправляем на dashboard');
+            window.location.href = '/dashboard';
+            return;
+        }
+    }
+    
+    // Обработчик отправки формы
+    loginForm.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        
+        const email = document.getElementById('email').value.trim();
+        const password = document.getElementById('password').value;
+        
+        // Скрываем предыдущие ошибки
+        if (errorMessage) {
+            errorMessage.style.display = 'none';
+        }
+        
+        // Валидация
+        if (!email || !password) {
+            showError('Заполните все поля');
+            return;
+        }
+        
+        // Показываем загрузку
+        const submitBtn = loginForm.querySelector('button[type="submit"]');
+        const originalText = submitBtn.innerHTML;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Вход...';
+        submitBtn.disabled = true;
+        
+        try {
+            const result = await window.auth.login(email, password);
+            
+            if (result.success) {
+                console.log('Вход успешен! Перенаправляем...');
+                
+                // Небольшая задержка для UX
+                setTimeout(() => {
+                    window.location.href = '/dashboard';
+                }, 500);
+                
+            } else {
+                showError(result.message || 'Ошибка входа');
+            }
+        } catch (error) {
+            console.error('Ошибка:', error);
+            showError('Ошибка соединения с сервером');
+        } finally {
+            // Восстанавливаем кнопку
+            submitBtn.innerHTML = originalText;
+            submitBtn.disabled = false;
+        }
+    });
+    
+    // Автозаполнение тестовых данных
+    document.querySelectorAll('.account-card').forEach(card => {
+        card.addEventListener('click', function() {
+            const email = this.getAttribute('data-email');
+            const password = this.getAttribute('data-password');
+            
+            if (email && password) {
+                document.getElementById('email').value = email;
+                document.getElementById('password').value = password;
+                
+                // Показываем уведомление
+                const notification = document.createElement('div');
+                notification.style.cssText = `
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    background: #27ae60;
+                    color: white;
+                    padding: 10px 20px;
+                    border-radius: 8px;
+                    z-index: 1000;
+                    animation: slideIn 0.3s ease-out;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                `;
+                notification.innerHTML = `<i class="fas fa-check"></i> Данные заполнены!`;
+                document.body.appendChild(notification);
+                
+                setTimeout(() => {
+                    notification.remove();
+                }, 2000);
+            }
+        });
+    });
+    
+    // Добавляем стили для анимации
+    if (!document.getElementById('auth-styles')) {
+        const style = document.createElement('style');
+        style.id = 'auth-styles';
+        style.textContent = `
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+    
+    console.log('Форма входа инициализирована');
+});
